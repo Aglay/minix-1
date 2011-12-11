@@ -1,0 +1,6 @@
+pkgin
+pkg_install
+bmake
+binutils
+clang
+bash

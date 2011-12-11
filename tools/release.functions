@@ -29,6 +29,17 @@ make_hdimage()
 	installboot -m hdimage /usr/mdec/masterboot
 }
 
+pkgpaths2pkgnames()
+{
+    while read pkg ; do
+        if echo $pkg | grep -q '/' ; then
+            bmake -C ${PKGSRCDIR}/$pkg -V '${PKGNAME}'
+        else
+            echo "$pkg"
+        fi
+    done <$1
+}
+
 retrieve()
 {
 	dir=$1
@@ -39,7 +50,7 @@ retrieve()
 		echo  " * Updating $dir
    from $url
    with $list"
-		files=`awk <$list '{ print "'$url'/" $1 ".tgz" }'`
+		files=`pkgpaths2pkgnames $list | awk '{ print "'$url'/" $1 ".tgz" }'`
 		fetch -r $files || true
 	)
 }

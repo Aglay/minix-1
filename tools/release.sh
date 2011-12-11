@@ -6,14 +6,10 @@ set -e
 
 version_pretty="`sh tell_config OS_RELEASE . OS_VERSION | tr -dc 0-9.`"
 version="`echo $version_pretty | tr . _`"
-PACKAGEDIR=/usr/pkgsrc/packages/$version_pretty/`uname -m`
 
 XBIN=usr/xbin
 SRC=src
-REPO=git://git.minix3.org/minix
 
-# List of packages included on installation media
-PACKAGELIST=packages.install
 secs=`expr 32 '*' 64`
 export SHELL=/bin/sh
 
@@ -24,30 +20,6 @@ if [ ! -x $PKG_ADD ]
 then	echo Please install pkg_install from pkgsrc.
 	exit 1
 fi
-
-# Packages we have to pre-install, and url to use
-PACKAGEURL=ftp://ftp.minix3.org/pub/minix/packages/$version_pretty/`uname -m`/All/
-PREINSTALLED_PACKAGES="
-	pkgin
-	pkg_install
-	bmake
-	binutils
-	clang
-	"
-#	pkg_tarup
-
-PKG_ADD_URL=$PACKAGEURL
-
-RELEASERC=$HOME/.releaserc
-
-if [ -f $RELEASERC ]
-then	. $RELEASERC
-fi
-
-set -- $* $RELOPTS
-
-# SVN trunk repo
-TRUNK=https://gforge.cs.vu.nl/svn/minix/trunk
 
 RELEASEDIR=/usr/r-staging
 RELEASEMNTDIR=/usr/r
@@ -63,13 +35,14 @@ BS=4096
 HDEMU=0
 COPY=0
 JAILMODE=0
-SVNREV=""
 REVTAG=""
 PACKAGES=1
 MINIMAL=0
 MAKEMAP=0
 EXTRAS_INSTALL=0
 EXTRAS_PATH=
+COMPRESS=1
+FILENAMEOUT=""
 
 # Do we have git?
 if git --version >/dev/null
@@ -79,60 +52,136 @@ then	if [ -d ../.git ]
 	fi
 fi
 
-FILENAMEOUT=""
+usage()
+{
+cat <<_EOF_ >&2
+Usage: `basename $0` [options] [configfile]
+Options:
+    -h		Build an HD image
+    -u		Build a USB image
+    -c		Copy current /usr/src instead of exporting git repository
+    -t <tag>	Use <tag> for the repository checkout
+    -p		Do not include optional binary packages in the image
+    -j <dir>	Run in jail mode using directory <dir>
+    -f <path>	Use <path> as filename for the image
+    -m		Create a minimal image (removes /usr/src/.git)
+    -M		Build the map
+    -l		Use local packages
+    -L <uri>	Use <uri> for packages
+    -r <uri>	Set the pkgin repositories.conf to <uri>
+    -e <path>	Copy extra files and directories from <path> onto the image
+    -z		Do not compress the image
+_EOF_
+    exit 1
+}
 
-while getopts "j:ls:pmMchu?r:f:L:e:" c
+# ----
+# Source in the default config settings
+# ----
+. release.default.conf
+
+# ----
+# If it exists, source in a ~/.releaserc on top of that
+# ----
+RELEASERC=$HOME/.releaserc
+
+if [ -f $RELEASERC ]
+then	. $RELEASERC
+fi
+
+set -- $RELOPTS $* $RELARGS
+
+# ----
+# Parse command line options but don't set their variables yet, just
+# collect those settings in $options
+# ----
+options=""
+error=0
+while getopts "ce:f:hij:lL:mMpruz?" c
 do
 	case "$c" in
-	\?)
-		echo "Usage: $0 [-l] [-p] [-c] [-h] [-m] [-M] [-r <tag>] [-u] [-f <filename>] [-s <username>] -j<jaildir> [-L <packageurl>] [-e <extras-path>]" >&2
-		exit 1
-	;;
-	h)
-		echo " * Making HD image"
-		IMG_BASE=minix${version}_bios
-		HDEMU=1
+	\?)	error=1
 		;;
-	c)
-		echo " * Copying, not SVN"
-		COPY=1
+
+	h)	echo " * Making HD image"
+		options="${options}IMG_BASE='minix${version}_bios'; "
+		options="${options}HDEMU=1; "
 		;;
-	p)
-		PACKAGES=0
+
+	u)	echo " * Making live USB-stick image"
+		options="${options}IMG_BASE='minix${version}_usb'; "
+		options="${options}HDEMU=1; "
+		options="${options}USB=1; "
 		;;
-	r)	
-		SVNREV=-r$OPTARG
+
+	c)	echo " * Copying, not SVN"
+		options="${options}COPY=1; "
 		;;
-	j)
-		RELEASEDIR=$OPTARG
-		JAILMODE=1
+
+	p)	options="${options}PACKAGES=0; "
 		;;
-	u)
-		echo " * Making live USB-stick image"
-		IMG_BASE=minix${version}_usb
-		HDEMU=1
-		USB=1
+
+	j)	options="${options}RELEASEDIR='${OPTARG}'; "
+		options="${options}JAILMODE=1; "
 		;;
-	f)
-		FILENAMEOUT="$OPTARG"
+
+	f)	options="${options}FILENAMEOUT='${OPTARG}'; "
 		;;
-	s)	USERNAME="--username=$OPTARG"
+
+	m)	options="${options}MINIMAL=1; "
+		options="${options}PACKAGES=0; "
 		;;
-	m)	MINIMAL=1
-		PACKAGES=0
+
+	M)	options="${options}MAKEMAP=1; "
 		;;
-	M)	MAKEMAP=1
+
+	l)	options="${options}PACKAGEURL='file://${PACKAGEDIR}/All'; "
 		;;
-	l)	PKG_ADD_URL=file://$PACKAGEDIR/All
+
+	L)	options="${options}PACKAGEURL='${OPTARG}'; "
 		;;
-	L)	PKG_ADD_URL="$OPTARG"
-		CUSTOM_PACKAGES=1
+
+	r)	options="${options}PKGINREPOS='${OPTARG}'; "
 		;;
-	e)	EXTRAS_INSTALL=1
-		EXTRAS_PATH="$OPTARG"
+
+	t)	options="${options}REVTAG='${OPTARG}'; "
 		;;
+
+	e)	options="${options}EXTRAS_INSTALL=1; "
+		options="${options}EXTRAS_PATH='${OPTARG}'; "
+		;;
+
+	z)	options="${options}COMPRESS=0; "
 	esac
 done
+
+# ----
+# On command line errors, show usage and bail out
+# ----
+if [ $error -ne 0 ] ; then
+    usage
+fi
+
+# ----
+# If an optional config file was specified, source that in
+# ----
+shift $((OPTIND-1))
+if [ $# -ge 2 ] ; then
+    usage
+fi
+if [ $# -eq 1 ] ; then
+.   $1
+fi
+
+# ----
+# Finally override anything with the command line options
+# ----
+eval "$options"
+
+# ----
+# Translate the packag paths in the list files into package names
+# ----
+PREINSTALLED_PACKAGES=`pkgpaths2pkgnames $PREINSTALLEDLIST`
 
 if [ $GITMODE -ne 1 -a $COPY -ne 1 ]
 then	echo "Need git to retrieve latest minix! Copying src instead!"
@@ -171,6 +220,8 @@ then	echo " * Cleanup old files"
 fi
 
 rm -rf $RELEASEDIR $RELEASEMNTDIR $IMG $ROOTIMAGE $CDFILES image*
+rm -f minix${version}_*.iso
+rm -f minix${version}_*.iso.*
 mkdir -p $CDFILES || exit
 mkdir -p $RELEASEDIR $RELEASEMNTDIR 
 mkdir -m 755 $RELEASEDIR/usr
@@ -207,8 +258,9 @@ then
 	if [ "$REVTAG" ]
 	then	echo "Doing checkout of $REVTAG."
 		(cd $srcdir && git checkout $REVTAG )
-	else	REVTAG=`(cd $srcdir && git show-ref HEAD -s10)`
-		echo "Retrieved repository head is $REVTAG."
+		REVCOMMIT=`(cd $srcdir && git show-ref $REVTAG -s10)`
+	else	REVCOMMIT=`(cd $srcdir && git show-ref HEAD -s10)`
+		echo "Retrieved repository head is $REVCOMMIT."
 	fi
 	if [ $MINIMAL -ne 0 ]
 	then	rm -r $srcdir/.git
@@ -216,14 +268,14 @@ then
 	echo "
 /* Added by release script  */
 #ifndef _VCS_REVISION
-#define _VCS_REVISION \"$REVTAG\"
+#define _VCS_REVISION \"$REVCOMMIT\"
 #endif" >>$CONFIGHEADER
 	DATE=`date +%Y%m%d`
 	# output image name
 	if [ "$USB" -ne 0 ]; then
-		IMG=${IMG_BASE}_${DATE}_${REVTAG}.img
+		IMG=${IMG_BASE}_${DATE}_${REVCOMMIT}.img
 	else
-		IMG=${IMG_BASE}_${DATE}_${REVTAG}.iso
+		IMG=${IMG_BASE}_${DATE}_${REVCOMMIT}.iso
 	fi
 else
 	echo "Copying contents from current src dir."
@@ -231,8 +283,12 @@ else
 	srcdir=/usr/$SRC
 	( cd $srcdir && tar --exclude .svn -cf - .  ) | ( cd $RELEASEDIR/usr && mkdir $SRC && cd $SRC && tar xf - )
 	REVTAG=copy
+	REVCOMMIT=copy
 	REVISION=unknown
 	IMG=${IMG_BASE}_copy.iso
+	if [ $MINIMAL -ne 0 ]
+	then	rm -r $srcdir/.git
+	fi
 fi
 
 echo " * Fixups for owners and modes of dirs and files"
@@ -262,13 +318,11 @@ echo " * Make hierarchy"
 chroot $RELEASEDIR "PATH=/$XBIN:/usr/pkg/bin sh -x /usr/$SRC/tools/chrootmake.sh etcfiles" || exit 1
 
 for p in $PREINSTALLED_PACKAGES
-do	echo " * Pre-installing: $p from $PKG_ADD_URL"
-    $PKG_ADD -f -P $RELEASEDIR $PKG_ADD_URL/$p
+do	echo " * Pre-installing: $p from $PACKAGEURL"
+    $PKG_ADD -f -P $RELEASEDIR $PACKAGEURL/$p
 done
 
-if [ "$CUSTOM_PACKAGES" ]
-then	echo $PKG_ADD_URL >$RELEASEDIR/usr/pkg/etc/pkgin/repositories.conf
-fi
+echo $PKGINREPOS >$RELEASEDIR/usr/pkg/etc/pkgin/repositories.conf
 
 echo " * Chroot build"
 chroot $RELEASEDIR "PATH=/$XBIN:/usr/pkg/bin MAKEMAP=$MAKEMAP sh -x /usr/$SRC/tools/chrootmake.sh" || exit 1
@@ -318,22 +372,15 @@ extrakb=`du -s $RELEASEDIR/usr/install | awk '{ print $1 }'`
 find $RELEASEDIR/usr | fgrep -v /install/ | wc -l >$RELEASEDIR/.usrfiles
 find $RELEASEDIR -print -path $RELEASEDIR/usr -prune | wc -l >$RELEASEDIR/.rootfiles
 
-fstab_marker="# Poor man's File System Table."
 echo " * Writing fstab"
 if [ "$USB" -ne 0 ]
 then
-	echo \
-"$fstab_marker
-root=/dev/c0d7p0s0
-usr=/dev/c0d7p0s2
-" > $RELEASEDIR/etc/fstab
+    echo "/dev/c0d7p0s0	/	mfs	rw	0 1" > $RELEASEDIR/etc/fstab
+    echo "/dev/c0d7p0s2	/usr	mfs	rw	0 2" >>$RELEASEDIR/etc/fstab
 elif [ "$HDEMU" -ne 0 ]
 then
-	echo \
-"$fstab_marker
-root=/dev/c0d7p0s0
-usr=/dev/c0d7p0s2
-usr_roflag=\"-r\"" > $RELEASEDIR/etc/fstab
+    echo "/dev/c0d7p0s0	/	mfs	rw	0 1" > $RELEASEDIR/etc/fstab
+    echo "/dev/c0d7p0s2	/usr	mfs	ro	0 2" >>$RELEASEDIR/etc/fstab
 fi
 
 echo " * Mounting $TMPDISKROOT as $RELEASEMNTDIR"
@@ -412,8 +459,11 @@ else
 		partition -m $IMG 0 81:$isosects 81:$ROOTSECTS 81:$USRSECTS
 	fi
 fi
-echo "${ZIP}ping $IMG"
-$ZIP -f $IMG
+
+if [ $COMPRESS -ne 0 ] ; then
+    echo " * ${ZIP}ping $IMG"
+    $ZIP -f $IMG
+fi
 
 if [ "$FILENAMEOUT" ]
 then	echo "$IMG" >$FILENAMEOUT
